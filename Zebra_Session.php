@@ -1,39 +1,20 @@
 <?php
+
 /**
  *  A PHP library acting as a drop-in replacement for PHP's default session handler, but instead of storing session data
- *  in flat files it stores them in a MySQL database, providing both better performance and better security and
+ *  in flat files it stores them in a MySQL database, providing better performance as well as better security and
  *  protection against session fixation and session hijacking.
  *
- *  Zebra_Session implements <i>session locking</i>. Session locking is a way to ensure that data is correctly handled
- *  in a scenario with multiple concurrent AJAX requests. Read more about it in this excellent article by <b>Andy Bakun</b>
- *  called {@link http://thwartedefforts.org/2006/11/11/race-conditions-with-ajax-and-php-sessions/ Race Conditions with Ajax and PHP Sessions}.
- *
- *  This library is also a solution for applications that are scaled across multiple web servers (using a
- *  load balancer or a round-robin DNS) and where the user's session data needs to be available. Storing sessions in a
- *  database makes them available to all of the servers!
- *
- *  Zebra_Session supports "flashdata" - session variable which will only be available for the next server request, and
- *  which will be automatically deleted afterwards. Typically used for informational or status messages (for example:
- *  "data has been successfully updated").
- *
- *  Zebra_Session is was inspired by John Herren's code from the {@link http://devzone.zend.com/413/trick-out-your-session-handler/ Trick out your session handler}
- *  article and {@link http://shiflett.org/articles/the-truth-about-sessions Chris Shiflett}'s articles about PHP sessions.
- *
- *  The code is heavily commented and generates no warnings/errors/notices when PHP's error reporting level is set to
- *  E_ALL.
- *
- *  Visit {@link http://stefangabos.ro/php-libraries/zebra-session/} for more information.
- *
- *  For more resources visit {@link http://stefangabos.ro/}
+ *  Read more {@link https://github.com/stefangabos/Zebra_Session/ here}
  *
  *  @author     Stefan Gabos <contact@stefangabos.ro>
- *  @version    2.1.4 (last revision: February 19, 2016)
- *  @copyright  (c) 2006 - 2016 Stefan Gabos
+ *  @version    2.1.6 (last revision: May 01, 2017)
+ *  @copyright  (c) 2006 - 2017 Stefan Gabos
  *  @license    http://www.gnu.org/licenses/lgpl-3.0.txt GNU LESSER GENERAL PUBLIC LICENSE
  *  @package    Zebra_Session
  */
-class Zebra_Session implements SessionHandlerInterface
-{
+class Zebra_Session {
+
     private $flashdata;
     private $flashdata_varname;
     private $session_lifetime;
@@ -42,6 +23,7 @@ class Zebra_Session implements SessionHandlerInterface
     private $lock_to_ip;
     private $lock_to_user_agent;
     private $table_name;
+
     /**
      *  Constructor of class. Initializes the class and automatically calls
      *  {@link http://php.net/manual/en/function.session-start.php start_session()}.
@@ -220,61 +202,156 @@ class Zebra_Session implements SessionHandlerInterface
      *
      *  @return void
      */
-    function __construct(&$link, $security_code, $session_lifetime = '', $lock_to_user_agent = true, $lock_to_ip = false, $gc_probability = '', $gc_divisor = '', $table_name = 'session_data', $lock_timeout = 60)
-    {
-        // store the connection link
-        $this->link = $link;
-        // continue if there is an active MySQL connection
-        if ($this->_pdo_ping()) {
+    public function __construct(&$link, $security_code, $session_lifetime = '', $lock_to_user_agent = true, $lock_to_ip = false, $gc_probability = '', $gc_divisor = '', $table_name = 'session_data', $lock_timeout = 60) {
+
+        // continue if the provided link is valid
+        if ($link instanceof MySQLi && $link->connect_error === null) {
+
+            // store the connection link
+            $this->link = $link;
+
             // make sure session cookies never expire so that session lifetime
             // will depend only on the value of $session_lifetime
             ini_set('session.cookie_lifetime', 0);
+
+            // tell the browser not to expose the cookie to client side scripting
+            // this makes it harder for an attacker to hijack the session ID
+            ini_set('session.cookie_httponly', 1);
+
+            // make sure that PHP only uses cookies for sessions and disallow session ID passing as a GET parameter
+            ini_set('session.use_only_cookies', 1);
+
             // if $session_lifetime is specified and is an integer number
             if ($session_lifetime != '' && is_integer($session_lifetime))
+
                 // set the new value
                 ini_set('session.gc_maxlifetime', (int)$session_lifetime);
+
             // if $gc_probability is specified and is an integer number
             if ($gc_probability != '' && is_integer($gc_probability))
+
                 // set the new value
                 ini_set('session.gc_probability', $gc_probability);
+
             // if $gc_divisor is specified and is an integer number
             if ($gc_divisor != '' && is_integer($gc_divisor))
+
                 // set the new value
                 ini_set('session.gc_divisor', $gc_divisor);
+
             // get session lifetime
             $this->session_lifetime = ini_get('session.gc_maxlifetime');
+
             // we'll use this later on in order to try to prevent HTTP_USER_AGENT spoofing
             $this->security_code = $security_code;
+
             // some other defaults
             $this->lock_to_user_agent = $lock_to_user_agent;
             $this->lock_to_ip = $lock_to_ip;
+
             // the table to be used by the class
             $this->table_name = $table_name;
+
             // the maximum amount of time (in seconds) for which a process can lock the session
             $this->lock_timeout = $lock_timeout;
+
             // register the new handler
-            @session_set_save_handler($this, true);
+            session_set_save_handler(
+                array(&$this, 'open'),
+                array(&$this, 'close'),
+                array(&$this, 'read'),
+                array(&$this, 'write'),
+                array(&$this, 'destroy'),
+                array(&$this, 'gc')
+            );
+
             // start the session
             session_start();
+
             // the name for the session variable that will be created upon script execution
             // and destroyed when instantiating this library, and which will hold information
             // about flashdata session variables
             $this->flashdata_varname = '_zebra_session_flashdata_ec3asbuiad';
+
             // assume no flashdata
             $this->flashdata = array();
+
             // if there are any flashdata variables that need to be handled
             if (isset($_SESSION[$this->flashdata_varname])) {
+
                 // store them
                 $this->flashdata = unserialize($_SESSION[$this->flashdata_varname]);
+
                 // and destroy the temporary session variable
                 unset($_SESSION[$this->flashdata_varname]);
+
             }
+
             // handle flashdata after script execution
             register_shutdown_function(array($this, '_manage_flashdata'));
+
         // if no MySQL connections could be found
         // trigger a fatal error message and stop execution
-    } else trigger_error('Zebra_Session: No PDO connection!', E_USER_ERROR);
+        } else trigger_error('Zebra_Session: No MySQL connection!', E_USER_ERROR);
+
     }
+
+    /**
+     *  Custom close() function
+     *
+     *  @access private
+     */
+    function close() {
+
+        // release the lock associated with the current session
+        if ($this->_mysql_query('SELECT RELEASE_LOCK("' . $this->session_lock . '")'))
+
+            // and return true if it was successful
+            return true;
+
+    }
+
+    /**
+     *  Custom destroy() function
+     *
+     *  @access private
+     */
+    function destroy($session_id) {
+
+        // delete the current session id from the database
+        $this->_mysql_query('
+
+            DELETE FROM
+                ' . $this->table_name . '
+            WHERE
+                session_id = "' . $this->_mysql_real_escape_string($session_id) . '"
+
+        ');
+
+        // return true if everything went well
+        return ($this->_mysql_affected_rows() !== -1);
+
+    }
+
+    /**
+     *  Custom gc() function (garbage collector)
+     *
+     *  @access private
+     */
+    function gc() {
+
+        // delete expired sessions from database
+        $this->_mysql_query('
+
+            DELETE FROM
+                ' . $this->table_name . '
+            WHERE
+                session_expire < "' . $this->_mysql_real_escape_string(time()) . '"
+
+        ');
+
+    }
+
     /**
      *  Get the number of active sessions - sessions that have not expired.
      *
@@ -297,21 +374,25 @@ class Zebra_Session implements SessionHandlerInterface
      *
      *  @return integer     Returns the number of active (not expired) sessions.
      */
-    public function get_active_sessions()
-    {
+    public function get_active_sessions() {
+
         // call the garbage collector
         $this->gc();
-        // counts the rows from the database
-        $result = $this->link->query('
+
+        // count the rows from the database
+        $result = mysqli_fetch_assoc($this->_mysql_query('
+
             SELECT
                 COUNT(session_id) as count
             FROM ' . $this->table_name . '
-        ') or die(_pdo_error());
 
-        $row = $result->fetch(PDO::FETCH_ASSOC);
+        '));
+
         // return the number of found rows
-        return $row['count'];
+        return $result['count'];
+
     }
+
     /**
      *  Queries the system for the values of <i>session.gc_maxlifetime</i>, <i>session.gc_probability</i> and <i>session.gc_divisor</i>
      *  and returns them as an associative array.
@@ -344,12 +425,13 @@ class Zebra_Session implements SessionHandlerInterface
      *                  as an associative array.
      *
      */
-    public function get_settings()
-    {
+    public function get_settings() {
+
         // get the settings
         $gc_maxlifetime = ini_get('session.gc_maxlifetime');
         $gc_probability = ini_get('session.gc_probability');
         $gc_divisor     = ini_get('session.gc_divisor');
+
         // return them as an array
         return array(
             'session.gc_maxlifetime'    =>  $gc_maxlifetime . ' seconds (' . round($gc_maxlifetime / 60) . ' minutes)',
@@ -357,7 +439,86 @@ class Zebra_Session implements SessionHandlerInterface
             'session.gc_divisor'        =>  $gc_divisor,
             'probability'               =>  $gc_probability / $gc_divisor * 100 . '%',
         );
+
     }
+
+    /**
+     *  Custom open() function
+     *
+     *  @access private
+     */
+    function open() {
+
+        return true;
+
+    }
+
+    /**
+     *  Custom read() function
+     *
+     *  @access private
+     */
+    function read($session_id) {
+
+        // get the lock name, associated with the current session
+        $this->session_lock = $this->_mysql_real_escape_string('session_' . $session_id);
+
+        // try to obtain a lock with the given name and timeout
+        $result = $this->_mysql_query('SELECT GET_LOCK("' . $this->session_lock . '", ' . $this->_mysql_real_escape_string($this->lock_timeout) . ')');
+
+        // stop if there was an error
+        if (!$result || mysqli_num_rows($result) != 1 || !($row = mysqli_fetch_array($result)) || $row[0] != 1) die('Zebra_Session: Could not obtain session lock!');
+
+        //  reads session data associated with a session id, but only if
+        //  -   the session ID exists;
+        //  -   the session has not expired;
+        //  -   if lock_to_user_agent is TRUE and the HTTP_USER_AGENT is the same as the one who had previously been associated with this particular session;
+        //  -   if lock_to_ip is TRUE and the host is the same as the one who had previously been associated with this particular session;
+        $hash = '';
+
+        // if we need to identify sessions by also checking the user agent
+        if ($this->lock_to_user_agent && isset($_SERVER['HTTP_USER_AGENT']))
+
+            $hash .= $_SERVER['HTTP_USER_AGENT'];
+
+        // if we need to identify sessions by also checking the host
+        if ($this->lock_to_ip && isset($_SERVER['REMOTE_ADDR']))
+
+            $hash .= $_SERVER['REMOTE_ADDR'];
+
+        // append this to the end
+        $hash .= $this->security_code;
+
+        $result = $this->_mysql_query('
+
+            SELECT
+                session_data
+            FROM
+                ' . $this->table_name . '
+            WHERE
+                session_id = "' . $this->_mysql_real_escape_string($session_id) . '" AND
+                session_expire > "' . time() . '" AND
+                hash = "' . $this->_mysql_real_escape_string(md5($hash)) . '"
+            LIMIT 1
+
+        ');
+
+        // if anything was found
+        if ($result && mysqli_num_rows($result) > 0) {
+
+            // return found data
+            $fields = mysqli_fetch_assoc($result);
+
+            // don't bother with the unserialization - PHP handles this automatically
+            return $fields['session_data'];
+
+        }
+
+        // on error return an empty string - this HAS to be an empty string
+        return '';
+
+    }
+
     /**
      *  Regenerates the session id.
      *
@@ -379,12 +540,14 @@ class Zebra_Session implements SessionHandlerInterface
      *
      *  @return void
      */
-    public function regenerate_id()
-    {
+    public function regenerate_id() {
+
         // regenerates the id (create a new session with a new id and containing the data from the old session)
         // also, delete the old session
         session_regenerate_id(true);
+
     }
+
     /**
      *  Sets a "flashdata" session variable which will only be available for the next server request, and which will be
      *  automatically deleted afterwards.
@@ -407,7 +570,7 @@ class Zebra_Session implements SessionHandlerInterface
      *  $session->set_flashdata('myvar', 'myval');
      *  </code>
      *
-     *  Flashdata session variables can be retrieved as any other session variable:
+     *  Flashdata session variables can be retrieved like any other session variable:
      *
      *  <code>
      *  if (isset($_SESSION['myvar'])) {
@@ -424,15 +587,21 @@ class Zebra_Session implements SessionHandlerInterface
      *
      *  @return void
      */
-    public function set_flashdata($name, $value)
-    {
+    public function set_flashdata($name, $value) {
+
         // set session variable
         $_SESSION[$name] = $value;
+
         // initialize the counter for this flashdata
         $this->flashdata[$name] = 0;
+
     }
+
     /**
-     *  Deletes all data related to the session
+     *  Deletes all data related to the session.
+     *
+     *  <i>This method runs the garbage collector respecting your environment's garbage collector-related properties.
+     *  Read {@link __construct() here} for more information.</i>
      *
      *  <code>
      *  // first, connect to a database containing the sessions table
@@ -452,240 +621,154 @@ class Zebra_Session implements SessionHandlerInterface
      *
      *  @return void
      */
-    public function stop()
-    {
-        // $this->regenerate_id();
+    public function stop() {
+
+        // if a cookie is used to pass the session id
+        if (ini_get('session.use_cookies')) {
+
+            // get session cookie's properties
+            $params = session_get_cookie_params();
+
+            // unset the cookie
+            setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'], $params['secure'], $params['httponly']);
+
+        }
+
+        // destroy the session
         session_unset();
         session_destroy();
-    }
-    /**
-     *  Custom close() function
-     *
-     *  @access private
-     */
-    function close()
-    {
-        // release the lock associated with the current session
-        $this->link->query('SELECT RELEASE_LOCK("' . $this->session_lock . '")')
-            // stop execution and print message on error
-            or die($this->_pdo_error());
-        return true;
-    }
-    /**
-     *  Custom destroy() function
-     *
-     *  @access private
-     */
-    function destroy($session_id)
-    {
-        // deletes the current session id from the database
-        $result = $this->link->query('
-            DELETE FROM
-                ' . $this->table_name . '
-            WHERE
-                session_id = ' . $this->link->quote($session_id) . '
-        ') or die($this->_pdo_error());
-        // if anything happened
-        // return true
-        if ($result->rowCount() !== -1) return true;
-        // if something went wrong, return false
-        return false;
-    }
-    /**
-     *  Custom gc() function (garbage collector)
-     *
-     *  @access private
-     */
-    function gc($maxlifetime)
-    {
-        // deletes expired sessions from database
-        $result = $this->link->query('
-            DELETE FROM
-                ' . $this->table_name . '
-            WHERE
-                session_expire < ' . $maxlifetime . '
-        ') or die($this->_pdo_error());
-    }
-    /**
-     *  Custom open() function
-     *
-     *  @access private
-     */
-    function open($save_path, $session_name)
-    {
-        return true;
-    }
-    /**
-     *  Custom read() function
-     *
-     *  @access private
-     */
-    function read($session_id)
-    {
-        // get the lock name, associated with the current session
-        $this->session_lock = $this->link->quote('session_' . $session_id);
-        // try to obtain a lock with the given name and timeout
-        $result = $this->_pdo_query('SELECT GET_LOCK("' . $this->session_lock . '", ' . $this->link->quote($this->lock_timeout) . ') as get_lock');
 
-        // if there was an error
-        // stop execution
-        //if (!is_object($result) || strtolower(get_class($result)) != 'mysqli_result' || @mysqli_num_rows($result) != 1 || !($row = mysqli_fetch_array($result)) || $row[0] != 1) die('Zebra_Session: Could not obtain session lock!');
-        $rows = $result->fetchAll(PDO::FETCH_ASSOC);
-        if (!is_object($result) || count(@$rows) != 1 || $rows[0]['get_lock'] != 1) die('Zebra_Session: Could not obtain session lock!');
-        //  reads session data associated with a session id, but only if
-        //  -   the session ID exists;
-        //  -   the session has not expired;
-        //  -   if lock_to_user_agent is TRUE and the HTTP_USER_AGENT is the same as the one who had previously been associated with this particular session;
-        //  -   if lock_to_ip is TRUE and the host is the same as the one who had previously been associated with this particular session;
-        $hash = '';
-        // if we need to identify sessions by also checking the user agent
-        if ($this->lock_to_user_agent && isset($_SERVER['HTTP_USER_AGENT']))
-            $hash .= $_SERVER['HTTP_USER_AGENT'];
-        // if we need to identify sessions by also checking the host
-        if ($this->lock_to_ip && isset($_SERVER['REMOTE_ADDR']))
-            $hash .= $_SERVER['REMOTE_ADDR'];
-        // append this to the end
-        $hash .= $this->security_code;
-        $result = $this->_pdo_query('
-            SELECT
-                session_data
-            FROM
-                ' . $this->table_name . '
-            WHERE
-                session_id = ' . $this->link->quote($session_id) . ' AND
-                session_expire > ' . time() . ' AND
-                hash = ' . $this->link->quote(md5($hash)) . '
-            LIMIT 1
-        ') or die($this->_pdo_error());
-        $rows = $result->fetchAll(PDO::FETCH_ASSOC);
-        if (is_object($result) && count(@$rows) == 1) {
-            return $rows[0]['session_data'];
-        }
-        // $this->regenerate_id();
-        // on error return an empty string - this HAS to be an empty string
-        return '';
-	}
+    }
+
     /**
      *  Custom write() function
      *
      *  @access private
      */
-    function write($session_id, $session_data)
-    {
-
-		if(!isset($_SESSION['user_id'])) {
-			$_SESSION['user_id'] = 0;
-		}
-
-		if(!isset($_SESSION['user_business_id'])) {
-			$_SESSION['user_business_id'] = 0;
-		}
+    function write($session_id, $session_data) {
 
         // insert OR update session's data - this is how it works:
         // first it tries to insert a new row in the database BUT if session_id is already in the database then just
         // update session_data and session_expire for that specific session_id
         // read more here http://dev.mysql.com/doc/refman/4.1/en/insert-on-duplicate.html
-        $result = $this->_pdo_query('
+        $result = $this->_mysql_query('
+
             INSERT INTO
                 ' . $this->table_name . ' (
                     session_id,
                     hash,
                     session_data,
-                    session_expire,
-					user_id,
-					user_business_id
+                    session_expire
                 )
             VALUES (
-                ' . $this->link->quote($session_id) . ',
-                ' . $this->link->quote(md5(($this->lock_to_user_agent && isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '') . ($this->lock_to_ip && isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '') . $this->security_code)) . ',
-                ' . $this->link->quote($session_data) . ',
-                ' . $this->link->quote(time() + $this->session_lifetime) . ',
-				' . $this->link->quote($_SESSION['user_id']) . ',
-				' . $this->link->quote($_SESSION['user_business_id']) . '
+                "' . $this->_mysql_real_escape_string($session_id) . '",
+                "' . $this->_mysql_real_escape_string(md5(($this->lock_to_user_agent && isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '') . ($this->lock_to_ip && isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '') . $this->security_code)) . '",
+                "' . $this->_mysql_real_escape_string($session_data) . '",
+                "' . $this->_mysql_real_escape_string(time() + $this->session_lifetime) . '"
             )
             ON DUPLICATE KEY UPDATE
-                session_data = ' . $this->link->quote($session_data) . ',
-                session_expire = ' . $this->link->quote(time() + $this->session_lifetime) . ',
-				user_id = ' . $this->link->quote($_SESSION['user_id']) . ',
-				user_business_id = ' . $this->link->quote($_SESSION['user_business_id']) . '
-        ') or die($this->_pdo_error());
+                session_data = "' . $this->_mysql_real_escape_string($session_data) . '",
+                session_expire = "' . $this->_mysql_real_escape_string(time() + $this->session_lifetime) . '"
 
-        // if anything happened
-        if ($result) {
+        ');
 
-            // note that after this type of queries, mysqli_affected_rows() returns
-            // - 1 if the row was inserted
-            // - 2 if the row was updated
-            // if the row was updated
-            // return TRUE
-            if (@$result->rowCount() > 0) return true;
-            // if the row was inserted
-            // return an empty string
-            else return '';
-        }
+        // if anything happened, return TRUE
         // if something went wrong, return false
-        return false;
-	}
+        return $result ? true : false;
+
+    }
+
     /**
      *  Manages flashdata behind the scenes
      *
      *  @access private
      */
-    function _manage_flashdata()
-    {
+    function _manage_flashdata() {
+
         // if there is flashdata to be handled
         if (!empty($this->flashdata)) {
+
             // iterate through all the entries
             foreach ($this->flashdata as $variable => $counter) {
+
                 // increment counter representing server requests
                 $this->flashdata[$variable]++;
+
                 // if we're past the first server request
                 if ($this->flashdata[$variable] > 1) {
+
                     // unset the session variable
                     unset($_SESSION[$variable]);
+
                     // stop tracking
                     unset($this->flashdata[$variable]);
+
                 }
+
             }
+
             // if there is any flashdata left to be handled
             if (!empty($this->flashdata))
+
                 // store data in a temporary session variable
                 $_SESSION[$this->flashdata_varname] = serialize($this->flashdata);
+
         }
+
     }
+
+    /**
+     *  Wrapper for PHP's "mysqli_affected_rows" function.
+     *
+     *  @access private
+     */
+    private function _mysql_affected_rows() {
+
+        // call "mysqli_affected_rows" and return the result
+        return mysqli_affected_rows($this->link);
+
+    }
+
     /**
      *  Wrapper for PHP's "mysqli_error" function.
      *
      *  @access private
      */
-    private function _pdo_error()
-    {
-        // return PDO error info
-        return 'Zebra_Session: ' . $this->link->errorInfo();
+    private function _mysql_error() {
+
+        // call "mysqli_error" and return the result
+        return 'Zebra_Session: ' . mysqli_error($this->link);
+
     }
+
     /**
      *  Wrapper for PHP's "mysqli_query" function.
      *
      *  @access private
      */
-    private function _pdo_query($query)
-    {
-        // execute a PDO query and returns the result
-        return $this->link->query($query);
+    private function _mysql_query($query) {
+
+        // call "mysqli_query"
+        $result = mysqli_query($this->link, $query)
+
+            // stop if there was an error
+            or die($this->_mysql_error());
+
+        // return the result if query was successful
+        return $result;
+
     }
+
     /**
-     *  Wrapper for PHP's "mysqli_ping" function.
+     *  Wrapper for PHP's "mysqli_real_escape_string" function.
      *
      *  @access private
      */
-    private function _pdo_ping()
-    {
-        // execute a PDO "ping" and returns the result
-        try {
-            $this->_pdo_query('SELECT 1');
-        } catch (PDOException $e) {
-            $this->link->init();            // Don't catch exception here, so that re-connect fail will throw exception
-        }
-        return true;
+    private function _mysql_real_escape_string($string) {
+
+        // call "mysqli_real_escape_string" and return the result
+        return mysqli_real_escape_string($this->link, $string);
+
     }
+
 }
